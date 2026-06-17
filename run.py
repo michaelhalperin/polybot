@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Polybot command-line entry point.
+
+Usage:
+  python run.py web             # launch the browser dashboard (recommended)
+  python run.py run             # start the trading loop in the terminal
+  python run.py scan            # one-shot: list opportunities, place NO trades
+  python run.py status          # print current portfolio summary
+  python run.py report          # performance + calibration on resolved trades
+  python run.py reset           # wipe the paper-trading database (asks first)
+
+All behaviour is controlled by config.yaml.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+from polybot.api import clob, gamma
+from polybot.bot import Bot
+from polybot.config import load_config
+from polybot.env import load_dotenv
+from polybot.log import setup_logging
+from polybot.store import Store
+from polybot.strategy import Strategy, rank_opportunities
+
+
+def cmd_run(cfg):
+    Bot(cfg).run()
+
+
+def cmd_scan(cfg):
+    """Dry run: show what the bot WOULD trade, without opening positions."""
+    log = setup_logging(cfg.log_level)
+    strat = Strategy(cfg)
+    markets = gamma.fetch_active_markets(
+        limit=int(cfg.universe.get("max_markets_scan", 250)),
+        min_liquidity=float(cfg.universe.get("min_liquidity", 0)),
+    )
+    min_vol = float(cfg.universe.get("min_volume_24hr", 0))
+    markets = [m for m in markets if m.volume_24hr >= min_vol]
+    tokens = [t for m in markets for t in m.token_ids]
+    books = clob.fetch_books(tokens)
+
+    opps = []
+    for m in markets:
+        opps.extend(strat.evaluate(m, books))
+    opps = rank_opportunities(opps)
+
+    print(f"\n{'='*80}\nTOP OPPORTUNITIES ({len(opps)} found)\n{'='*80}")
+    if not opps:
+        print("None right now. Markets may be efficiently priced — try lowering")
+        print("strategy.min_edge in config.yaml, or scan again later.")
+        return
+    for i, o in enumerate(opps[:25], 1):
+        print(f"{i:2d}. [{o.kind:9s}] edge {o.edge:+.3f}  conf {o.confidence:.2f}  "
+              f"score {o.score:.3f}")
+        print(f"     {o.market.question[:74]}")
+        print(f"     {o.notes}")
+    print(f"{'='*80}\n(scan is read-only — no trades placed)\n")
+
+
+def cmd_status(cfg):
+    log = setup_logging(cfg.log_level)
+    if not os.path.exists(cfg.db_path):
+        print("No database yet. Run `python run.py run` first.")
+        return
+    store = Store(cfg.db_path)
+    s = store.stats()
+    cash = float(store.get_meta("cash") or cfg.bankroll)
+    start = float(store.get_meta("starting_bankroll") or cfg.bankroll)
+    open_pos = store.open_positions()
+    open_val = sum(p["cost_usd"] for p in open_pos)  # cost basis (no live book here)
+    print(f"\n{'='*64}\nPOLYBOT STATUS\n{'='*64}")
+    print(f"  cash:           ${cash:.2f}")
+    print(f"  open positions: {len(open_pos)} (cost basis ${open_val:.2f})")
+    print(f"  realized P&L:   ${s['realized_pnl']:+.2f}")
+    print(f"  closed trades:  {s['closed']} (win rate {s['win_rate']*100:.0f}%)")
+    print(f"  est. equity:    ${cash + open_val:.2f}  (start ${start:.2f})")
+    if open_pos:
+        print(f"\n  OPEN POSITIONS:")
+        for p in open_pos:
+            print(f"   - {p['side_name']:5s} x{p['shares']:.1f} @ {p['avg_cost']:.3f}"
+                  f"  [{p['kind']}]  {p['market'][:46]}")
+    print(f"{'='*64}\n")
+    store.close()
+
+
+def cmd_report(cfg):
+    from polybot.report import build_report, format_text
+    if not os.path.exists(cfg.db_path):
+        print("No database yet. Run `python run.py web` and let it trade first.")
+        return
+    store = Store(cfg.db_path)
+    print(format_text(build_report(store)))
+    store.close()
+
+
+def cmd_web(cfg, host, port, autostart=False):
+    from polybot.web.server import BotRunner, create_app
+    log = setup_logging(cfg.log_level)
+    runner = BotRunner(cfg)
+    app = create_app(cfg, runner)
+    url = f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}"
+    log.info("Polybot dashboard running at %s  (Ctrl+C to quit)", url)
+    if autostart:
+        runner.start()
+        log.info("Autostart enabled — bot loop is RUNNING.")
+    else:
+        log.info("The bot is loaded but PAUSED — click ▶ Start in the browser.")
+    app.run(host=host, port=port, threaded=True, use_reloader=False)
+
+
+def cmd_reset(cfg):
+    if os.path.exists(cfg.db_path):
+        ans = input(f"Delete {cfg.db_path} and all paper history? [y/N] ")
+        if ans.strip().lower() == "y":
+            os.remove(cfg.db_path)
+            print("Database deleted.")
+        else:
+            print("Cancelled.")
+    else:
+        print("No database to delete.")
+
+
+def main():
+    load_dotenv()  # pick up ANTHROPIC_API_KEY etc. from a local .env (if present)
+    parser = argparse.ArgumentParser(description="Polybot — Polymarket paper-trading bot")
+    parser.add_argument("command", nargs="?", default="web",
+                        choices=["web", "run", "scan", "status", "report", "reset"])
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--autostart", action="store_true",
+                        help="start the trading loop immediately (for servers)")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    setup_logging(cfg.log_level)
+
+    if args.command == "web":
+        # Hosts like Render provide $PORT and expect binding on 0.0.0.0.
+        port = int(os.environ.get("PORT", args.port))
+        host = "0.0.0.0" if (os.environ.get("PORT") and args.host == "127.0.0.1") else args.host
+        autostart = args.autostart or os.environ.get("POLYBOT_AUTOSTART") == "1"
+        cmd_web(cfg, host, port, autostart)
+    else:
+        {
+            "run": cmd_run,
+            "scan": cmd_scan,
+            "status": cmd_status,
+            "report": cmd_report,
+            "reset": cmd_reset,
+        }[args.command](cfg)
+
+
+if __name__ == "__main__":
+    main()

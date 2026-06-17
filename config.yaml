@@ -1,0 +1,88 @@
+# ======================================================================
+# Polybot configuration
+# Edit these values to tune the bot. Comments explain every setting.
+# ======================================================================
+
+# "paper"  -> simulated trades, NO real money (the only mode implemented).
+# "live"   -> reserved; intentionally blocked until you explicitly enable it.
+mode: paper
+
+# Starting bankroll for paper trading, in USDC (Polymarket's currency).
+bankroll: 200.0
+
+# Seconds to wait between full market scans.
+poll_interval_seconds: 60
+
+# How many scan cycles to run. 0 = run forever (until Ctrl+C).
+max_cycles: 0
+
+# ----------------------------------------------------------------------
+# UNIVERSE: which markets the bot is even allowed to look at.
+# ----------------------------------------------------------------------
+universe:
+  min_liquidity: 5000        # skip thin markets (less than $5k liquidity)
+  min_volume_24hr: 500       # skip markets nobody is trading
+  max_markets_scan: 250      # cap markets per cycle (controls API load)
+  exclude_closing_within_hours: 2   # avoid markets about to resolve
+
+# ----------------------------------------------------------------------
+# STRATEGY: how the bot decides something is a good bet.
+# ----------------------------------------------------------------------
+strategy:
+  # ARBITRAGE (riskless): buy YES + NO when their asks sum to < $1.
+  arb_min_profit: 0.01       # require >=1 cent profit per $1 set, after fees
+
+  # CRYPTO MODEL (real edge): price "Will BTC be above $X on <date>?" markets
+  # against the LIVE exchange spot price + realized volatility. Trades only
+  # when the market disagrees with the model by more than crypto_min_edge.
+  enable_crypto_model: true
+  crypto_min_edge: 0.05      # require >=5 cents of edge vs the model
+  crypto_max_spread: 0.08    # skip markets whose bid/ask is wider than this
+
+  # AI MARKET UNDERSTANDING (optional): use a Claude model to read each
+  # market's question AND its resolution rules. This lets the bot price
+  # crypto markets the simple parser misses, and SKIP markets whose rules are
+  # tricky/ambiguous (a "gotcha" guard). Requires the ANTHROPIC_API_KEY
+  # environment variable. Off by default; falls back to the parser if off.
+  enable_llm_understanding: true
+  llm_model: claude-haiku-4-5    # cheap + fast; runs across many markets
+
+  # BOOK VALUE (no proven edge — OFF by default): order-book imbalance +
+  # momentum. It tends to bleed the spread; leave off unless experimenting.
+  enable_book_value: false
+  min_edge: 0.04             # required edge for the book-value signal
+  imbalance_coeff: 0.03      # how much book imbalance shifts fair value
+  momentum_coeff: 0.30       # how much 1-day momentum shifts fair value
+  depth_levels: 8            # order-book levels used for imbalance
+  min_confidence: 0.25       # ignore weak signals
+
+# ----------------------------------------------------------------------
+# RISK: position sizing and hard limits. The bot will never exceed these.
+# ----------------------------------------------------------------------
+risk:
+  max_fraction_per_trade: 0.05   # at most 5% of bankroll in one position
+  kelly_fraction: 0.25           # bet 1/4 of the "full Kelly" amount (conservative)
+  max_total_exposure: 0.80       # never deploy more than 80% of bankroll at once
+  max_open_positions: 15
+  max_book_take_fraction: 0.10   # take at most 10% of available depth (limits slippage)
+  take_profit: 0.40              # close a value position after +40% gain
+  stop_loss: 0.30                # close a value position after -30% loss
+  min_trade_usd: 1.0             # don't bother with sub-$1 trades
+  # Correlation control: stops the bot piling into one event (the "12 Iran
+  # bets that are really one bet" problem). Markets in the same Polymarket
+  # event share a "theme".
+  max_fraction_per_theme: 0.15   # at most 15% of bankroll across one event
+  max_positions_per_theme: 3     # at most 3 positions in one event
+
+# ----------------------------------------------------------------------
+# FEES: Polymarket charges taker fees on some (not all) markets.
+# Per-market fees are read automatically; this is the fallback default.
+# ----------------------------------------------------------------------
+fees:
+  default_taker_rate: 0.0
+
+storage:
+  db_path: data/polybot.db
+
+logging:
+  level: INFO                # DEBUG for very verbose output

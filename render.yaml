@@ -1,0 +1,30 @@
+# Render Blueprint for Polybot — see DEPLOY.md for step-by-step instructions.
+#
+# One always-on Web Service that serves the dashboard AND runs the bot loop
+# (POLYBOT_AUTOSTART), with a persistent disk so the SQLite database (and your
+# performance-report history) survives restarts and redeploys.
+services:
+  - type: web
+    name: polybot
+    runtime: python
+    plan: starter            # NOTE: the free plan sleeps when idle, which would
+                             # stop the bot. "starter" (~$7/mo) stays always-on.
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python run.py web"   # reads $PORT, binds 0.0.0.0, autostarts
+    healthCheckPath: /healthz
+    autoDeploy: false
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: POLYBOT_AUTOSTART     # start trading automatically on boot
+        value: "1"
+      - key: POLYBOT_DB_PATH       # put the SQLite DB on the persistent disk
+        value: "/var/data/polybot.db"
+      - key: ANTHROPIC_API_KEY     # set the secret value in the Render dashboard
+        sync: false
+      - key: POLYBOT_PASSWORD      # dashboard login password — set in dashboard
+        sync: false
+    disk:
+      name: polybot-data
+      mountPath: /var/data
+      sizeGB: 1

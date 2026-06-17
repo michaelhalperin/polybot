@@ -1,0 +1,60 @@
+"""Gamma API client — fetches the catalogue of markets.
+
+Gamma is Polymarket's public, read-only metadata API. No API key required.
+Docs: https://docs.polymarket.com (Gamma Markets API)
+"""
+from __future__ import annotations
+
+from typing import List
+
+from ..log import get_logger
+from ..models import Market
+from .http import get_json
+
+BASE = "https://gamma-api.polymarket.com"
+
+
+def fetch_active_markets(limit: int = 250, min_liquidity: float = 0.0) -> List[Market]:
+    """Return active, open, order-book-enabled markets sorted by volume.
+
+    Paginates through Gamma until `limit` qualifying markets are collected.
+    """
+    log = get_logger()
+    out: List[Market] = []
+    offset = 0
+    page = 100
+    while len(out) < limit:
+        data = get_json(f"{BASE}/markets", params={
+            "limit": page,
+            "offset": offset,
+            "active": "true",
+            "closed": "false",
+            "order": "volume24hr",
+            "ascending": "false",
+        })
+        if not data:
+            break
+        for d in data:
+            m = Market.from_gamma(d)
+            if not m.enable_order_book or not m.accepting_orders:
+                continue
+            if not m.is_binary:
+                continue
+            if m.liquidity < min_liquidity:
+                continue
+            out.append(m)
+            if len(out) >= limit:
+                break
+        if len(data) < page:
+            break  # no more pages
+        offset += page
+    log.info("Gamma: fetched %d qualifying markets", len(out))
+    return out
+
+
+def fetch_market(condition_id: str) -> Market:
+    """Fetch a single market by its condition id (used to check resolution)."""
+    data = get_json(f"{BASE}/markets", params={"condition_ids": condition_id})
+    if data:
+        return Market.from_gamma(data[0])
+    return None
