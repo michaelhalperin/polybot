@@ -66,20 +66,20 @@ class CryptoFeed:
         return price
 
     def _fetch_spot(self, symbol: str) -> Optional[float]:
-        d = get_json("https://api.binance.com/api/v3/ticker/price",
-                     params={"symbol": symbol})
-        if d and "price" in d:
-            try:
-                return float(d["price"])
-            except (TypeError, ValueError):
-                pass
-        # Coinbase fallback (BTCUSDT -> BTC-USD)
         base = symbol.replace("USDT", "")
-        d = get_json(f"https://api.coinbase.com/v2/prices/{base}-USD/spot")
+        # Coinbase first — works from US cloud hosts (Render). Binance often
+        # returns 451 (geo-blocked) there, so we try it only as a fallback.
+        d = get_json(f"https://api.coinbase.com/v2/prices/{base}-USD/spot", retries=1)
         try:
             return float(d["data"]["amount"])
         except (TypeError, ValueError, KeyError):
-            self.log.warning("No spot price for %s", symbol)
+            pass
+        d = get_json("https://api.binance.com/api/v3/ticker/price",
+                     params={"symbol": symbol}, retries=1)
+        try:
+            return float(d["price"])
+        except (TypeError, ValueError, KeyError):
+            self.log.warning("No spot price for %s (Coinbase + Binance failed)", symbol)
             return None
 
     # ------------------------------------------------------------------
@@ -95,13 +95,10 @@ class CryptoFeed:
 
     def _fetch_vol(self, symbol: str) -> float:
         fallback = DEFAULT_VOL.get(symbol, 0.80)
-        data = get_json("https://api.binance.com/api/v3/klines",
-                        params={"symbol": symbol, "interval": "1h", "limit": 336})
-        if not data or len(data) < 24:
-            return fallback
-        try:
-            closes = [float(row[4]) for row in data]
-        except (TypeError, ValueError, IndexError):
+        closes = self._coinbase_closes(symbol) or self._binance_closes(symbol)
+        if not closes or len(closes) < 24:
+            self.log.warning("No candle data for %s; using default vol %.0f%%",
+                             symbol, fallback * 100)
             return fallback
         rets = [math.log(closes[i] / closes[i - 1])
                 for i in range(1, len(closes)) if closes[i - 1] > 0]
@@ -109,7 +106,28 @@ class CryptoFeed:
             return fallback
         mean = sum(rets) / len(rets)
         var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
-        hourly_sigma = math.sqrt(var)
-        annual = hourly_sigma * math.sqrt(24 * 365)
-        # sanity clamp
-        return max(0.05, min(3.0, annual))
+        annual = math.sqrt(var) * math.sqrt(24 * 365)
+        return max(0.05, min(3.0, annual))   # sanity clamp
+
+    def _coinbase_closes(self, symbol: str) -> Optional[list]:
+        base = symbol.replace("USDT", "")
+        rows = get_json(f"https://api.exchange.coinbase.com/products/{base}-USD/candles",
+                        params={"granularity": 3600}, retries=1)
+        if not isinstance(rows, list) or len(rows) < 24:
+            return None
+        try:
+            # candle = [time, low, high, open, close, volume], newest first
+            return [float(r[4]) for r in sorted(rows, key=lambda r: r[0])]
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _binance_closes(self, symbol: str) -> Optional[list]:
+        data = get_json("https://api.binance.com/api/v3/klines",
+                        params={"symbol": symbol, "interval": "1h", "limit": 336},
+                        retries=1)
+        if not isinstance(data, list) or len(data) < 24:
+            return None
+        try:
+            return [float(row[4]) for row in data]
+        except (TypeError, ValueError, IndexError):
+            return None
