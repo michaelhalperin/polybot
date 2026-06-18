@@ -37,6 +37,9 @@ class Bot:
         self.last_opportunities = []
         self.last_cycle_ts = 0.0
         self.cycle_count = 0
+        # Set by the web runner so a long cycle (e.g. many LLM calls) can be
+        # interrupted promptly when the user clicks Stop.
+        self.should_stop = lambda: False
 
     # ------------------------------------------------------------------
     def run(self):
@@ -84,6 +87,8 @@ class Bot:
         books = clob.fetch_books(token_ids)
         opps = []
         for m in markets:
+            if self.should_stop():   # bail out fast on Stop (between LLM calls)
+                break
             opps.extend(self.strategy.evaluate(m, books))
         return rank_opportunities(opps), books
 
@@ -166,6 +171,8 @@ class Bot:
         books = clob.fetch_books(tokens)
 
         for pos in positions:
+            if self.should_stop():
+                break
             cid = pos["condition_id"]
             if cid not in resolved_cache:
                 resolved_cache[cid] = gamma.fetch_market(cid)
@@ -177,8 +184,11 @@ class Bot:
                 self.broker.resolve(pos, won)
                 continue
 
-            # 2) Arbitrage legs are held to resolution; nothing else to do.
-            if pos["kind"] == "arbitrage":
+            # 2) Crypto-model and arbitrage bets are PROBABILITY bets — held to
+            #    resolution (paid out $1 or $0). Applying day-trade take-profit/
+            #    stop-loss to them just churns the bid/ask spread to death, so
+            #    TP/SL is restricted to the (off-by-default) "value" strategy.
+            if pos["kind"] != "value":
                 continue
 
             # 3) Take-profit / stop-loss for value positions, marked at bid.

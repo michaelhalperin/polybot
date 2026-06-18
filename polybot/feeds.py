@@ -69,7 +69,8 @@ class CryptoFeed:
         base = symbol.replace("USDT", "")
         # Coinbase first — works from US cloud hosts (Render). Binance often
         # returns 451 (geo-blocked) there, so we try it only as a fallback.
-        d = get_json(f"https://api.coinbase.com/v2/prices/{base}-USD/spot", retries=1)
+        # retries=2 rides out Coinbase's occasional dropped connections.
+        d = get_json(f"https://api.coinbase.com/v2/prices/{base}-USD/spot", retries=2)
         try:
             return float(d["data"]["amount"])
         except (TypeError, ValueError, KeyError):
@@ -112,7 +113,7 @@ class CryptoFeed:
     def _coinbase_closes(self, symbol: str) -> Optional[list]:
         base = symbol.replace("USDT", "")
         rows = get_json(f"https://api.exchange.coinbase.com/products/{base}-USD/candles",
-                        params={"granularity": 3600}, retries=1)
+                        params={"granularity": 3600}, retries=2)
         if not isinstance(rows, list) or len(rows) < 24:
             return None
         try:

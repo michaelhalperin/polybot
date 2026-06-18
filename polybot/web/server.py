@@ -44,6 +44,8 @@ class BotRunner:
         self._stop = threading.Event()
         self._cycle_lock = threading.Lock()  # only one cycle at a time
         self.running = False
+        # Let the bot abort a long in-progress cycle when Stop is pressed.
+        self.bot.should_stop = self._stop.is_set
 
     def start(self):
         if self.running:
@@ -60,6 +62,9 @@ class BotRunner:
         if not self.running:
             return False
         self._stop.set()
+        # Clear the active flag right away so the dashboard flips to "stopped"
+        # immediately, instead of waiting for the loop's cycle to finish.
+        set_bot_active(self.bot.store, False)
         self.log.info(">>> stop requested; finishing current cycle...")
         return True
 
@@ -67,6 +72,7 @@ class BotRunner:
         """Run exactly one cycle now (used when the loop is stopped)."""
         if self.running:
             return False
+        self._stop.clear()   # a prior Stop must not cancel this one-off cycle
         threading.Thread(target=self._one_cycle, daemon=True).start()
         return True
 

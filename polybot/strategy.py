@@ -49,6 +49,11 @@ class Strategy:
         self.enable_crypto_model = bool(s.get("enable_crypto_model", True))
         self.crypto_min_edge = float(s.get("crypto_min_edge", 0.05))
         self.crypto_max_spread = float(s.get("crypto_max_spread", 0.08))
+        # Relative spread guard: skip markets whose bid/ask gap is a large
+        # fraction of the price. An absolute guard misses cheap markets where a
+        # 1.6c spread on a 5c price is ~30% — exactly the illiquid longshots
+        # that produced terrible fills.
+        self.crypto_max_spread_pct = float(s.get("crypto_max_spread_pct", 0.20))
         self.feed = CryptoFeed() if self.enable_crypto_model else None
         # Optional AI market-understanding layer (off unless enabled + API key).
         self.understanding = None
@@ -130,8 +135,11 @@ class Strategy:
             if ask is None or ask <= 0 or ask >= 1:
                 continue
             spread = book.spread
-            if spread is not None and spread > self.crypto_max_spread:
-                continue  # too wide to enter without giving back the edge
+            mid = book.mid
+            if spread is not None and (
+                    spread > self.crypto_max_spread
+                    or (mid and spread / mid > self.crypto_max_spread_pct)):
+                continue  # too wide / illiquid — bad fills, skip
             edge = (prob - ask) - fee * ask
             if edge < self.crypto_min_edge:
                 continue

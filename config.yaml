@@ -37,7 +37,11 @@ strategy:
   # when the market disagrees with the model by more than crypto_min_edge.
   enable_crypto_model: true
   crypto_min_edge: 0.05      # require >=5 cents of edge vs the model
-  crypto_max_spread: 0.08    # skip markets whose bid/ask is wider than this
+  crypto_max_spread: 0.08    # skip markets whose bid/ask gap (absolute) is wider
+  crypto_max_spread_pct: 0.20  # ...or wider than 20% of the price (illiquid longshots)
+  # NOTE: crypto bets are held to RESOLUTION (paid $1/$0), not day-traded — the
+  # take_profit/stop_loss below apply only to the off-by-default "book value"
+  # strategy. This prevents the bid/ask spread churn that drained the bankroll.
 
   # AI MARKET UNDERSTANDING (optional): use a Claude model to read each
   # market's question AND its resolution rules. This lets the bot price

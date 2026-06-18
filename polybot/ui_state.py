@@ -43,21 +43,19 @@ def touch_cycle(store: "Store", cycle_count: int, opps: List["Opportunity"]):
 
 
 def is_bot_alive(store: "Store", poll_interval: float) -> bool:
-    """True when a bot loop completed a cycle recently (CLI or web)."""
-    threshold = poll_interval * 2.5
-    now = time.time()
+    """True only when a bot loop is *currently* running (CLI or web).
 
-    if store.get_meta("bot_active") == "1":
-        ts = float(store.get_meta("last_cycle_ts") or 0)
-        if ts and (now - ts) < threshold:
-            return True
-
-    # Fallback: equity snapshots are written every trading cycle.
-    eq = store.latest_equity()
-    if eq and (now - float(eq["ts"])) < threshold:
-        return True
-
-    return False
+    Relies on the explicit `bot_active` flag plus a fresh heartbeat
+    (`last_cycle_ts`). It deliberately does NOT fall back to "a recent equity
+    snapshot exists" — that snapshot lingers for minutes after the bot stops,
+    which made a stopped bot still look alive (the Stop button appeared to do
+    nothing). If a process dies without clearing the flag, the heartbeat goes
+    stale and this returns False on its own.
+    """
+    if store.get_meta("bot_active") != "1":
+        return False
+    ts = float(store.get_meta("last_cycle_ts") or 0)
+    return bool(ts and (time.time() - ts) < poll_interval * 2.5)
 
 
 def load_opportunities(store: "Store") -> list:
