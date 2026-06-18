@@ -68,6 +68,21 @@ CREATE TABLE IF NOT EXISTS market_analysis (
     json         TEXT NOT NULL,        -- the LLM's structured analysis
     ts           REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS opportunity_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           REAL NOT NULL,
+    kind         TEXT NOT NULL,
+    question     TEXT NOT NULL,
+    side         TEXT,
+    price        REAL,
+    fair_value   REAL,
+    edge         REAL,
+    confidence   REAL,
+    data_json    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_opp_log_ts ON opportunity_log(ts);
 """
 
 
@@ -214,6 +229,43 @@ class Store:
             "SELECT ts,total,cash,positions_val,realized_pnl FROM equity "
             "ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
         return list(reversed(rows))
+
+    def log_opportunities(self, opps: list, ts: float | None = None):
+        """Append opportunities from a cycle or scan to the history log."""
+        if not opps:
+            return
+        ts = ts or time.time()
+        rows = []
+        for o in opps:
+            rows.append((
+                ts,
+                o.get("kind") or "",
+                o.get("question") or "",
+                o.get("side"),
+                o.get("price"),
+                o.get("fair_value"),
+                o.get("edge"),
+                o.get("confidence"),
+                json.dumps(o),
+            ))
+        self.conn.executemany(
+            "INSERT INTO opportunity_log "
+            "(ts,kind,question,side,price,fair_value,edge,confidence,data_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        self.conn.commit()
+
+    def opportunity_history(self, limit: int = 300) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM opportunity_log ORDER BY ts DESC, id DESC LIMIT ?",
+            (limit,)).fetchall()
+
+    def position_history(self, limit: int = 200) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM positions "
+            "ORDER BY COALESCE(closed_at, opened_at) DESC LIMIT ?",
+            (limit,)).fetchall()
 
     def recent_trades(self, limit: int = 50) -> List[sqlite3.Row]:
         return self.conn.execute(

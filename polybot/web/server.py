@@ -18,7 +18,14 @@ from ..api import clob
 from ..bot import Bot
 from ..config import Config, load_config
 from ..log import LOG_BUFFER, get_logger
+from ..profiles import (
+    db_path_for_profile,
+    prod_available,
+    prod_remote_url,
+    prod_view_mode,
+)
 from ..store import Store
+from .remote import remote_get
 from ..ui_state import (
     is_bot_alive,
     load_logs,
@@ -31,6 +38,28 @@ from ..ui_state import (
 BOOK_CACHE_TTL = 8  # seconds; avoid refetching books on every UI poll
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+class ViewState:
+    """Which dataset the dashboard reads (local SQLite vs prod remote/snapshot)."""
+
+    def __init__(self, profile: str = "local"):
+        self._profile = profile
+        self._lock = threading.Lock()
+
+    def get(self) -> str:
+        with self._lock:
+            return self._profile
+
+    def set(self, profile: str):
+        with self._lock:
+            self._profile = profile
+
+    def read_only(self) -> bool:
+        return self.get() == "prod"
+
+    def source(self) -> str:
+        return prod_view_mode(self.get())
 
 
 class BotRunner:
@@ -100,12 +129,42 @@ class BotRunner:
 
 
 # ----------------------------------------------------------------------
-def create_app(cfg: Config, runner: BotRunner) -> Flask:
+def create_app(cfg: Config, runner: BotRunner,
+               view_state: ViewState | None = None) -> Flask:
     app = Flask(__name__, static_folder=None)
+    view = view_state or ViewState("local")
 
-    def store() -> Store:
-        # short-lived read connection per request (WAL allows concurrent reads)
+    def local_store() -> Store:
         return Store(cfg.db_path)
+
+    def viewed_store() -> Store:
+        profile = view.get()
+        path = db_path_for_profile(profile, cfg.db_path)
+        return Store(path)
+
+    def _profile_payload() -> dict:
+        mode = view.source()
+        return {
+            "profile": view.get(),
+            "profile_source": mode,
+            "read_only": view.read_only(),
+            "prod_available": prod_available(),
+            "prod_url": prod_remote_url() if prod_remote_url() else None,
+        }
+
+    def _remote_or_local(path: str, params: dict | None = None):
+        if view.source() == "remote":
+            return remote_get(prod_remote_url(), path, params=params)
+        return None
+
+    def _remote_history(path: str, params: dict | None = None, fallback: str | None = None):
+        """Remote history route, with optional legacy endpoint fallback."""
+        remote = _remote_or_local(path, params=params)
+        if remote is not None:
+            return remote
+        if view.source() == "remote" and fallback:
+            return _remote_or_local(fallback, params=params)
+        return None
 
     # Cache of current best bids (liquidation prices) keyed by token id, so the
     # UI can poll frequently without refetching order books every time.
@@ -122,13 +181,18 @@ def create_app(cfg: Config, runner: BotRunner) -> Flask:
                 bid_cache[t] = (now, b.best_bid if b else None)
         return {t: bid_cache.get(t, (0, None))[1] for t in tokens}
 
-    # Optional password protection. Set POLYBOT_PASSWORD on any public host
-    # (e.g. Render) so only you can view/control the dashboard. Off locally.
+    # Optional password protection on public hosts (e.g. Render). POLYBOT_PASSWORD
+    # in a local .env is also used to authenticate to the remote prod API — that
+    # must NOT lock down localhost unless POLYBOT_REQUIRE_AUTH=1.
     password = os.environ.get("POLYBOT_PASSWORD")
+    require_auth = bool(password) and (
+        os.environ.get("POLYBOT_REQUIRE_AUTH") == "1"
+        or os.environ.get("PORT")  # Render / cloud bind
+    )
 
     @app.before_request
     def _require_auth():
-        if not password or request.path == "/healthz":
+        if not require_auth or request.path == "/healthz":
             return None
         auth = request.authorization
         if not auth or not hmac.compare_digest(auth.password or "", password):
@@ -145,9 +209,33 @@ def create_app(cfg: Config, runner: BotRunner) -> Flask:
         with open(os.path.join(HERE, "index.html")) as f:
             return f.read()
 
+    @app.route("/api/profile", methods=["GET", "POST"])
+    def api_profile():
+        if request.method == "POST":
+            body = request.get_json(silent=True) or {}
+            profile = (body.get("profile") or "").strip().lower()
+            if profile not in ("local", "prod"):
+                return jsonify({"ok": False, "error": "profile must be local or prod"}), 400
+            if profile == "prod" and not prod_available():
+                return jsonify({
+                    "ok": False,
+                    "error": (
+                        "Prod not configured. Set POLYBOT_PROD_URL in .env for live view, "
+                        "or run `python run.py pull` to download a snapshot."
+                    ),
+                    **_profile_payload(),
+                }), 400
+            view.set(profile)
+            return jsonify({"ok": True, **_profile_payload()})
+        return jsonify(_profile_payload())
+
     @app.route("/api/status")
     def api_status():
-        st = store()
+        remote = _remote_or_local("/api/status")
+        if remote is not None:
+            remote.update(_profile_payload())
+            return jsonify(remote)
+        st = viewed_store()
         s = st.stats()
         eq = st.latest_equity()
         cash = float(st.get_meta("cash") or cfg.bankroll)
@@ -167,7 +255,7 @@ def create_app(cfg: Config, runner: BotRunner) -> Flask:
         st.close()
         cycle_count = runner.bot.cycle_count if runner.running else db_cycle
         last_cycle_ts = runner.bot.last_cycle_ts if runner.running else db_cycle_ts
-        return jsonify({
+        payload = {
             "mode": cfg.mode,
             "running": running,
             "external": external,
@@ -184,13 +272,18 @@ def create_app(cfg: Config, runner: BotRunner) -> Flask:
             "cycle_count": cycle_count,
             "last_cycle_ts": last_cycle_ts,
             "ai_active": _ai_active(runner),
-        })
+        }
+        payload.update(_profile_payload())
+        return jsonify(payload)
 
     @app.route("/api/ai")
     def api_ai():
         """What the AI understanding layer has been doing."""
+        remote = _remote_or_local("/api/ai")
+        if remote is not None:
+            return jsonify(remote)
         u = getattr(runner.bot.strategy, "understanding", None)
-        st = store()
+        st = viewed_store()
         stats = st.analysis_stats()
         recent = []
         for r in st.recent_analyses(40):
@@ -217,7 +310,10 @@ def create_app(cfg: Config, runner: BotRunner) -> Flask:
 
     @app.route("/api/positions")
     def api_positions():
-        st = store()
+        remote = _remote_or_local("/api/positions")
+        if remote is not None:
+            return jsonify(remote)
+        st = viewed_store()
         rows = [dict(p) for p in st.open_positions()]
         st.close()
         bids = live_bids([r["token_id"] for r in rows])
@@ -240,56 +336,140 @@ def create_app(cfg: Config, runner: BotRunner) -> Flask:
     @app.route("/api/trades")
     def api_trades():
         limit = int(request.args.get("limit", 40))
-        st = store()
+        remote = _remote_or_local("/api/trades", params={"limit": limit})
+        if remote is not None:
+            return jsonify(remote)
+        st = viewed_store()
         rows = [dict(t) for t in st.recent_trades(limit)]
         st.close()
         return jsonify(rows)
 
     @app.route("/api/equity")
     def api_equity():
-        st = store()
-        rows = [dict(e) for e in st.equity_curve()]
+        limit = int(request.args.get("limit", 5000))
+        remote = _remote_or_local("/api/equity", params={"limit": limit})
+        if remote is not None:
+            return jsonify(remote)
+        st = viewed_store()
+        rows = [dict(e) for e in st.equity_curve(limit=limit)]
         st.close()
         return jsonify(rows)
 
     @app.route("/api/opportunities")
     def api_opportunities():
-        if runner.running and runner.bot.last_opportunities:
+        remote = _remote_or_local("/api/opportunities")
+        if remote is not None:
+            return jsonify(remote)
+        if view.get() == "local" and runner.running and runner.bot.last_opportunities:
             rows = [_opp_dict(o) for o in runner.bot.last_opportunities[:30]]
         else:
-            st = store()
+            st = viewed_store()
             rows = load_opportunities(st)
             st.close()
         return jsonify(rows)
 
     @app.route("/api/scan", methods=["POST"])
     def api_scan():
+        if view.read_only():
+            return jsonify({"ok": False, "error": "read-only prod view"}), 403
         """Fresh read-only scan (does not trade)."""
         opps, _ = runner.bot.find_opportunities()
         runner.bot.last_opportunities = opps
         runner.bot.last_cycle_ts = time.time()
-        return jsonify([_opp_dict(o) for o in opps[:30]])
+        rows = [_opp_dict(o) for o in opps[:30]]
+        st = local_store()
+        st.log_opportunities(rows, ts=runner.bot.last_cycle_ts)
+        st.close()
+        return jsonify(rows)
+
+    @app.route("/api/history/trades")
+    def api_history_trades():
+        limit = int(request.args.get("limit", 500))
+        remote = _remote_history(
+            "/api/history/trades", params={"limit": limit}, fallback="/api/trades")
+        if remote is not None:
+            return jsonify(remote)
+        st = viewed_store()
+        rows = [dict(t) for t in st.recent_trades(limit)]
+        st.close()
+        return jsonify(rows)
+
+    @app.route("/api/history/positions")
+    def api_history_positions():
+        limit = int(request.args.get("limit", 200))
+        remote = _remote_history("/api/history/positions", params={"limit": limit})
+        if remote is not None:
+            return jsonify(remote)
+        st = viewed_store()
+        rows = [dict(p) for p in st.position_history(limit)]
+        st.close()
+        return jsonify(rows)
+
+    @app.route("/api/history/opportunities")
+    def api_history_opportunities():
+        limit = int(request.args.get("limit", 300))
+        remote = _remote_history("/api/history/opportunities", params={"limit": limit})
+        if remote is not None:
+            return jsonify(remote)
+        st = viewed_store()
+        rows = [dict(o) for o in st.opportunity_history(limit)]
+        st.close()
+        return jsonify(rows)
+
+    @app.route("/api/history/ai")
+    def api_history_ai():
+        limit = int(request.args.get("limit", 200))
+        remote = _remote_history("/api/history/ai", params={"limit": limit}, fallback="/api/ai")
+        if remote is not None:
+            if isinstance(remote, dict) and "recent" in remote:
+                remote = remote["recent"][:limit]
+            return jsonify(remote)
+        st = viewed_store()
+        recent = []
+        for r in st.recent_analyses(limit):
+            try:
+                d = json.loads(r["json"])
+            except (ValueError, TypeError):
+                continue
+            recent.append({
+                "question": r["question"], "ts": r["ts"],
+                "tradeable": d.get("tradeable"),
+                "resolution_risk": d.get("resolution_risk"),
+                "summary": d.get("summary"),
+            })
+        st.close()
+        return jsonify(recent)
 
     @app.route("/api/report")
     def api_report():
+        remote = _remote_or_local("/api/report")
+        if remote is not None:
+            return jsonify(remote)
         from ..report import build_report
-        st = store()
+        st = viewed_store()
         rep = build_report(st)
         st.close()
         return jsonify(rep)
 
     @app.route("/api/logs")
     def api_logs():
-        st = store()
+        remote = _remote_or_local("/api/logs")
+        if remote is not None:
+            return jsonify(remote)
+        st = viewed_store()
         lines = load_logs(st)
         st.close()
-        return jsonify(lines or LOG_BUFFER.lines())
+        if view.get() == "local":
+            lines = lines or LOG_BUFFER.lines()
+        return jsonify(lines)
 
     @app.route("/api/control", methods=["POST"])
     def api_control():
+        if view.read_only():
+            return jsonify({"ok": False, "running": False, "error": "read-only prod view"})
         action = (request.get_json(silent=True) or {}).get("action")
         ok = False
-        st = store()
+        st = local_store()
         blocked = is_bot_alive(st, cfg.poll_interval) and not runner.running
         st.close()
         if action == "start":
@@ -304,13 +484,15 @@ def create_app(cfg: Config, runner: BotRunner) -> Flask:
                 ok = False
             else:
                 ok = runner.run_once()
-        st2 = store()
+        st2 = local_store()
         external = is_bot_alive(st2, cfg.poll_interval) and not runner.running
         st2.close()
         return jsonify({"ok": ok, "running": runner.running or external})
 
     @app.route("/api/config", methods=["GET", "POST"])
     def api_config():
+        if view.read_only() and request.method == "POST":
+            return jsonify({"ok": False, "error": "read-only prod view"}), 403
         if request.method == "POST":
             updates = request.get_json(silent=True) or {}
             _apply_config_updates(cfg, runner, updates)

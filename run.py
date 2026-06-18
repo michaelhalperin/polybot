@@ -7,7 +7,12 @@ Usage:
   python run.py scan            # one-shot: list opportunities, place NO trades
   python run.py status          # print current portfolio summary
   python run.py report          # performance + calibration on resolved trades
+  python run.py pull            # download prod DB snapshot (needs POLYBOT_PROD_SSH)
   python run.py reset           # wipe the paper-trading database (asks first)
+
+Profiles (local vs prod dashboard view):
+  python run.py web --profile prod     # open dashboard viewing prod (live or snapshot)
+  Set POLYBOT_PROD_URL in .env for live prod view; POLYBOT_PASSWORD must match prod.
 
 All behaviour is controlled by config.yaml.
 """
@@ -15,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 
 from polybot.api import clob, gamma
@@ -22,6 +28,7 @@ from polybot.bot import Bot
 from polybot.config import load_config
 from polybot.env import load_dotenv
 from polybot.log import setup_logging
+from polybot.profiles import db_path_for_profile, resolve_profile
 from polybot.store import Store
 from polybot.strategy import Strategy, rank_opportunities
 
@@ -97,13 +104,16 @@ def cmd_report(cfg):
     store.close()
 
 
-def cmd_web(cfg, host, port, autostart=False):
-    from polybot.web.server import BotRunner, create_app
+def cmd_web(cfg, host, port, autostart=False, profile="local"):
+    from polybot.web.server import BotRunner, ViewState, create_app
     log = setup_logging(cfg.log_level)
     runner = BotRunner(cfg)
-    app = create_app(cfg, runner)
+    view_state = ViewState(profile)
+    app = create_app(cfg, runner, view_state)
     url = f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}"
     log.info("Polybot dashboard running at %s  (Ctrl+C to quit)", url)
+    if profile == "prod":
+        log.info("Viewing PROD data (read-only). Local bot uses %s.", cfg.db_path)
     if autostart:
         runner.start()
         log.info("Autostart enabled — bot loop is RUNNING.")
@@ -124,33 +134,56 @@ def cmd_reset(cfg):
         print("No database to delete.")
 
 
+def cmd_pull(cfg):
+    """Download the prod SQLite DB from Render into data/polybot-prod.db."""
+    ssh = (os.environ.get("POLYBOT_PROD_SSH") or "").strip()
+    if not ssh:
+        print("Set POLYBOT_PROD_SSH in .env (Render → Connect → SSH).")
+        print("Example: POLYBOT_PROD_SSH=srv-abc123@ssh.render.com")
+        sys.exit(1)
+    remote = os.environ.get("POLYBOT_PROD_DB_REMOTE", "/var/data/polybot.db")
+    dest = db_path_for_profile("prod", cfg.db_path)
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    for suffix in ("", "-wal", "-shm"):
+        src = f"{ssh}:{remote}{suffix}"
+        dst = f"{dest}{suffix}"
+        print(f"scp {src} -> {dst}")
+        subprocess.run(["scp", src, dst], check=True)
+    print(f"\nProd snapshot saved to {dest}")
+    print("View it with: python run.py web --profile prod")
+
+
 def main():
     load_dotenv()  # pick up ANTHROPIC_API_KEY etc. from a local .env (if present)
     parser = argparse.ArgumentParser(description="Polybot — Polymarket paper-trading bot")
     parser.add_argument("command", nargs="?", default="web",
-                        choices=["web", "run", "scan", "status", "report", "reset"])
+                        choices=["web", "run", "scan", "status", "report", "pull", "reset"])
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--profile", choices=["local", "prod"], default=None,
+                        help="dashboard data source: local SQLite or prod (read-only)")
     parser.add_argument("--autostart", action="store_true",
                         help="start the trading loop immediately (for servers)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     setup_logging(cfg.log_level)
+    profile = resolve_profile(args.profile)
 
     if args.command == "web":
         # Hosts like Render provide $PORT and expect binding on 0.0.0.0.
         port = int(os.environ.get("PORT", args.port))
         host = "0.0.0.0" if (os.environ.get("PORT") and args.host == "127.0.0.1") else args.host
         autostart = args.autostart or os.environ.get("POLYBOT_AUTOSTART") == "1"
-        cmd_web(cfg, host, port, autostart)
+        cmd_web(cfg, host, port, autostart, profile=profile)
     else:
         {
             "run": cmd_run,
             "scan": cmd_scan,
             "status": cmd_status,
             "report": cmd_report,
+            "pull": cmd_pull,
             "reset": cmd_reset,
         }[args.command](cfg)
 

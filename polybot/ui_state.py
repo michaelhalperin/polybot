@@ -34,12 +34,12 @@ def set_bot_active(store: "Store", active: bool):
 
 
 def touch_cycle(store: "Store", cycle_count: int, opps: List["Opportunity"]):
-    store.set_meta("last_cycle_ts", str(time.time()))
+    ts = time.time()
+    store.set_meta("last_cycle_ts", str(ts))
     store.set_meta("cycle_count", str(cycle_count))
-    store.set_meta(
-        "last_opportunities",
-        json.dumps([opp_to_dict(o) for o in opps[:30]]),
-    )
+    opp_dicts = [opp_to_dict(o) for o in opps[:30]]
+    store.set_meta("last_opportunities", json.dumps(opp_dicts))
+    store.log_opportunities(opp_dicts, ts=ts)
 
 
 def is_bot_alive(store: "Store", poll_interval: float) -> bool:
