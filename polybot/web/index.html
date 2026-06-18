@@ -98,6 +98,10 @@
   .verdict.skip{background:rgba(248,81,73,.15);color:var(--red)}
   .risk-low{color:var(--green)} .risk-medium{color:var(--yellow)} .risk-high{color:var(--red)}
   .ai-note{color:var(--muted);font-size:12px;margin:2px 0 14px;line-height:1.55}
+  table.ai-table{table-layout:auto;min-width:100%}
+  table.ai-table .col-verdict,table.ai-table .col-risk{width:1%;white-space:nowrap}
+  table.ai-table .col-market{min-width:140px;max-width:240px}
+  table.ai-table .col-sees{min-width:220px;white-space:normal;word-break:break-word;line-height:1.45}
   .ai-off{color:var(--muted);padding:18px;text-align:center;line-height:1.7}
   .ai-off code{background:var(--panel2);padding:1px 6px;border-radius:4px;color:var(--text)}
   .report-banner{padding:11px 14px;border-radius:8px;font-size:13px;margin-bottom:14px;border:1px solid var(--border);line-height:1.5}
@@ -121,7 +125,6 @@
   <div class="spacer"></div>
   <button class="primary" id="btnStart" onclick="control('start')">▶ Start</button>
   <button class="danger" id="btnStop" onclick="control('stop')">■ Stop</button>
-  <button id="btnOnce" onclick="control('run_once')">↻ Run one cycle</button>
   <button id="btnScan" onclick="scan()">🔍 Scan now</button>
 </header>
 
@@ -218,7 +221,6 @@ async function refresh(){
       : "stopped";
     $("btnStart").disabled = s.running;
     $("btnStop").disabled = !s.running || s.external;
-    $("btnOnce").disabled = s.running;
     $("cycleInfo").textContent = s.cycle_count ?
        `· cycle ${s.cycle_count} · ${s.open_count} open` : "";
     const aib = $("aiBadge");
@@ -487,8 +489,8 @@ function renderAI(d){
   if(!recent.length){
     feed = `<div class="empty">No markets analyzed yet — run a scan or a cycle.</div>`;
   } else {
-    feed = `<div class="table-wrap tall"><table>
-      <tr><th>Verdict</th><th>Risk</th><th>Market</th><th>What the AI sees</th></tr>` +
+    feed = `<div class="table-wrap tall"><table class="ai-table">
+      <tr><th class="col-verdict">Verdict</th><th class="col-risk">Risk</th><th class="col-market">Market</th><th class="col-sees">What the AI sees</th></tr>` +
       recent.map(r=>{
         const skip = (!r.tradeable) || r.resolution_risk === "high";
         const verdict = skip ? `<span class="verdict skip">skip</span>`
@@ -496,10 +498,10 @@ function renderAI(d){
         const risk = `<span class="risk-${r.resolution_risk||'medium'}">${r.resolution_risk||'?'}</span>`;
         const sum = r.summary || "";
         return `<tr>
-          <td>${verdict}</td>
-          <td>${risk}</td>
-          <td class="q" title="${(r.question||'').replace(/"/g,'&quot;')}">${r.question||''}</td>
-          <td class="q muted" title="${sum.replace(/"/g,'&quot;')}">${sum}</td></tr>`;
+          <td class="col-verdict">${verdict}</td>
+          <td class="col-risk">${risk}</td>
+          <td class="col-market q" title="${(r.question||'').replace(/"/g,'&quot;')}">${r.question||''}</td>
+          <td class="col-sees muted">${sum}</td></tr>`;
       }).join("") + `</table></div>`;
   }
   body.innerHTML = cardsHtml + note + feed;
