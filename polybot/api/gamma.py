@@ -67,3 +67,26 @@ def fetch_market(condition_id: str) -> Market:
         if data:
             return Market.from_gamma(data[0])
     return None
+
+
+def fetch_markets(condition_ids) -> dict:
+    """Batch-fetch many markets by condition id, INCLUDING closed ones.
+
+    Returns {condition_id: Market}. Used for position settlement so we make a
+    couple of calls per cycle instead of one per open position (avoids Gamma
+    rate-limiting on a long run). Two queries per chunk — the default endpoint
+    hides closed markets, so we also query closed=true and merge.
+    """
+    result: dict = {}
+    ids = list(dict.fromkeys(condition_ids))   # dedup, keep order
+    chunk = 50
+    for i in range(0, len(ids), chunk):
+        batch = ids[i:i + chunk]
+        for params in ({"condition_ids": batch, "limit": len(batch)},
+                       {"condition_ids": batch, "closed": "true", "limit": len(batch)}):
+            data = get_json(f"{BASE}/markets", params=params)
+            for d in data or []:
+                m = Market.from_gamma(d)
+                if m.condition_id:
+                    result[m.condition_id] = m
+    return result

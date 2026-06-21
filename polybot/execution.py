@@ -117,9 +117,14 @@ class PaperBroker:
         return True
 
     # ------------------------------------------------------------------
-    def close_at_price(self, pos, price: float, reason: str):
-        """Close a position by selling all shares at `price` (paper)."""
-        fee_rate = float(self.cfg.fees.get("default_taker_rate", 0.0))
+    def close_at_price(self, pos, price: float, reason: str, fee_rate=None):
+        """Close a position by selling all shares at `price` (paper).
+
+        `fee_rate=None` uses the configured taker fee (a normal sell). Pass 0.0
+        for settlement/void — at resolution there is no trade and no taker fee.
+        """
+        if fee_rate is None:
+            fee_rate = float(self.cfg.fees.get("default_taker_rate", 0.0))
         shares = pos["shares"]
         gross = shares * price
         fee = gross * fee_rate
@@ -140,6 +145,22 @@ class PaperBroker:
         return realized
 
     def resolve(self, pos, won: bool):
-        """Settle a position at market resolution: $1/share if it won else $0."""
+        """Settle a position at market resolution: $1/share if it won else $0.
+
+        No taker fee — settlement is a payout, not a trade.
+        """
         price = 1.0 if won else 0.0
-        return self.close_at_price(pos, price, "resolved")
+        return self.close_at_price(pos, price, "resolved", fee_rate=0.0)
+
+    def settle_void(self, pos, token_price):
+        """Settle a closed market that did NOT resolve cleanly to $1/$0.
+
+        Covers 50/50 resolutions and voids/refunds. If the token carries a sane
+        resolved price (e.g. 0.5), pay that; otherwise refund the cost basis so
+        capital isn't locked forever (realized P&L ~0). Marked separately so it
+        does not pollute the calibration table.
+        """
+        if token_price is not None and 0.01 < token_price < 0.99:
+            return self.close_at_price(pos, token_price, "voided", fee_rate=0.0)
+        # No usable resolution price -> refund what was paid (avg_cost incl. fee).
+        return self.close_at_price(pos, pos["avg_cost"], "refunded", fee_rate=0.0)

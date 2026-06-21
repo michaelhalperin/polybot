@@ -97,6 +97,48 @@ def test_stop_clears_alive_despite_recent_equity():
     assert is_bot_alive(s, 60) is False
 
 
+def test_void_refund_unlocks_capital():
+    """A closed market with no clean resolution should refund cost (P&L ~0),
+    not lock the position forever or book a fake total loss."""
+    import tempfile, time as _t
+    from polybot.config import Config as Cfg
+    from polybot.execution import PaperBroker
+    from polybot.store import Store
+    s = Store(tempfile.mktemp(suffix=".db"))
+    cfg = Cfg(raw={"bankroll": 200.0, "fees": {"default_taker_rate": 0.0}})
+    broker = PaperBroker(cfg, s)
+    pid = s.add_position(
+        condition_id="c1", token_id="YES", market="m", side_name="Yes",
+        kind="crypto", shares=100.0, avg_cost=0.10, cost_usd=10.0,
+        fair_at_entry=0.3, group_id=None, theme="x", ai_verified=0,
+        status="open", opened_at=_t.time())
+    pos = dict(s.open_positions()[0])
+    cash_before = broker.cash
+    broker.settle_void(pos, token_price=None)          # void -> refund
+    assert abs((broker.cash - cash_before) - 10.0) < 1e-6   # got the $10 back
+    closed = dict(s.closed_positions()[0])
+    assert abs(closed["realized_pnl"]) < 1e-6           # ~0 P&L
+    assert closed["exit_reason"] == "refunded"          # excluded from calibration
+
+
+def test_void_5050_settles_at_half():
+    import tempfile, time as _t
+    from polybot.config import Config as Cfg
+    from polybot.execution import PaperBroker
+    from polybot.store import Store
+    s = Store(tempfile.mktemp(suffix=".db"))
+    broker = PaperBroker(Cfg(raw={"bankroll": 200.0, "fees": {}}), s)
+    s.add_position(condition_id="c1", token_id="YES", market="m", side_name="Yes",
+                   kind="crypto", shares=100.0, avg_cost=0.10, cost_usd=10.0,
+                   fair_at_entry=0.3, group_id=None, theme="x", ai_verified=0,
+                   status="open", opened_at=_t.time())
+    pos = dict(s.open_positions()[0])
+    broker.settle_void(pos, token_price=0.5)            # 50/50 -> $0.50/share
+    closed = dict(s.closed_positions()[0])
+    assert abs(closed["proceeds_usd"] - 50.0) < 1e-6    # 100 * 0.5
+    assert closed["exit_reason"] == "voided"
+
+
 def _run_all():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

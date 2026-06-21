@@ -23,6 +23,10 @@ from .risk import RiskManager
 from .store import Store
 from .strategy import Strategy, rank_opportunities
 
+# How long past a market's end date to wait before settling a closed-but-not-
+# cleanly-resolved market as a void/refund (resolution can lag by a day+).
+VOID_GRACE_SECONDS = 48 * 3600
+
 
 class Bot:
     def __init__(self, cfg: Config):
@@ -164,8 +168,9 @@ class Bot:
         take_profit = float(r.get("take_profit", 0.40))
         stop_loss = float(r.get("stop_loss", 0.30))
 
-        # Cache market resolution lookups per condition_id this cycle.
-        resolved_cache: Dict[str, Market] = {}
+        # One batched lookup of every market we hold (incl. closed ones),
+        # instead of one Gamma call per position.
+        markets = gamma.fetch_markets([p["condition_id"] for p in positions])
         # Books for live MTM of value positions.
         tokens = [p["token_id"] for p in positions]
         books = clob.fetch_books(tokens)
@@ -173,15 +178,22 @@ class Bot:
         for pos in positions:
             if self.should_stop():
                 break
-            cid = pos["condition_id"]
-            if cid not in resolved_cache:
-                resolved_cache[cid] = gamma.fetch_market(cid)
-            market = resolved_cache[cid]
+            market = markets.get(pos["condition_id"])
 
-            # 1) Settle if the market has resolved.
-            if market is not None and market.closed and _is_resolved(market):
-                won = _token_won(market, pos["token_id"])
-                self.broker.resolve(pos, won)
+            # 1) Settle closed markets.
+            if market is not None and market.closed:
+                if _is_resolved(market):           # clean $1/$0 resolution
+                    won = _token_won(market, pos["token_id"])
+                    self.broker.resolve(pos, won)
+                else:
+                    # Closed but not cleanly resolved: void / 50-50 / refund.
+                    # Wait out a grace period past the end date first, in case
+                    # resolution is just lagging; then settle so capital isn't
+                    # locked forever.
+                    end_ts = _parse_iso(market.end_date)
+                    if end_ts is None or (time.time() - end_ts) > VOID_GRACE_SECONDS:
+                        self.broker.settle_void(pos, _token_price(market, pos["token_id"]))
+                    # else: within grace -> leave open, retry next cycle
                 continue
 
             # 2) Crypto-model and arbitrage bets are PROBABILITY bets — held to
@@ -263,3 +275,12 @@ def _token_won(market: Market, token_id: str) -> bool:
     except ValueError:
         return False
     return market.outcome_prices[idx] >= 0.99
+
+
+def _token_price(market: Market, token_id: str):
+    """Resolved outcome price for our token (e.g. 0.5 on a 50/50), or None."""
+    try:
+        idx = market.token_ids.index(token_id)
+        return float(market.outcome_prices[idx])
+    except (ValueError, IndexError, TypeError):
+        return None
