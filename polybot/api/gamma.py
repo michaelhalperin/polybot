@@ -53,8 +53,17 @@ def fetch_active_markets(limit: int = 250, min_liquidity: float = 0.0) -> List[M
 
 
 def fetch_market(condition_id: str) -> Market:
-    """Fetch a single market by its condition id (used to check resolution)."""
-    data = get_json(f"{BASE}/markets", params={"condition_ids": condition_id})
-    if data:
-        return Market.from_gamma(data[0])
+    """Fetch a single market by its condition id (used to check resolution).
+
+    IMPORTANT: Gamma's /markets endpoint hides *closed* markets by default, so a
+    plain condition_ids lookup returns nothing once a market resolves — which is
+    exactly when we need it (to settle a position). We therefore try the normal
+    lookup first (still-open markets) and then explicitly with closed=true
+    (resolved markets), so settlement actually fires.
+    """
+    for params in ({"condition_ids": condition_id},
+                   {"condition_ids": condition_id, "closed": "true"}):
+        data = get_json(f"{BASE}/markets", params=params)
+        if data:
+            return Market.from_gamma(data[0])
     return None

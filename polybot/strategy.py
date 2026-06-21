@@ -54,6 +54,11 @@ class Strategy:
         # 1.6c spread on a 5c price is ~30% — exactly the illiquid longshots
         # that produced terrible fills.
         self.crypto_max_spread_pct = float(s.get("crypto_max_spread_pct", 0.20))
+        # Don't trade at floor/ceiling prices. There, the market is ~certain and
+        # the model's probability is least reliable — the source of absurd bets
+        # like "8000 shares of NO at $0.001". Only trade priced 3c..97c.
+        self.crypto_min_price = float(s.get("crypto_min_price", 0.03))
+        self.crypto_max_price = float(s.get("crypto_max_price", 0.97))
         self.feed = CryptoFeed() if self.enable_crypto_model else None
         # Optional AI market-understanding layer (off unless enabled + API key).
         self.understanding = None
@@ -134,6 +139,8 @@ class Strategy:
             ask = book.best_ask
             if ask is None or ask <= 0 or ask >= 1:
                 continue
+            if ask < self.crypto_min_price or ask > self.crypto_max_price:
+                continue  # extreme price -> model unreliable, skip
             spread = book.spread
             mid = book.mid
             if spread is not None and (

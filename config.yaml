@@ -39,6 +39,8 @@ strategy:
   crypto_min_edge: 0.05      # require >=5 cents of edge vs the model
   crypto_max_spread: 0.08    # skip markets whose bid/ask gap (absolute) is wider
   crypto_max_spread_pct: 0.20  # ...or wider than 20% of the price (illiquid longshots)
+  crypto_min_price: 0.03     # don't trade at floor/ceiling prices (model unreliable there)
+  crypto_max_price: 0.97
   # NOTE: crypto bets are held to RESOLUTION (paid $1/$0), not day-traded — the
   # take_profit/stop_loss below apply only to the off-by-default "book value"
   # strategy. This prevents the bid/ask spread churn that drained the bankroll.

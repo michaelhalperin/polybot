@@ -69,6 +69,17 @@ def test_tight_spread_still_trades():
     assert any(o.kind == "crypto" for o in opps)
 
 
+def test_extreme_price_is_skipped():
+    """No bets at floor prices (the '8000 shares of NO at $0.001' bug)."""
+    s = strat()
+    m = make_market("Will Bitcoin reach $63,000 in June?")  # touch ~ near-certain
+    # YES near-certain (ask ~0.99), NO at the floor (0.001) — both must be skipped
+    yes = book(0.985, 0.995)
+    no = book(0.001, 0.002)
+    opps = s.evaluate(m, {"YES": yes, "NO": no})
+    assert opps == []
+
+
 def test_stop_clears_alive_despite_recent_equity():
     """The Stop bug: a recent equity snapshot must NOT keep the bot 'alive'."""
     import tempfile
