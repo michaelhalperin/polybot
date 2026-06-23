@@ -72,11 +72,15 @@ def _end_ts(market: Market) -> Optional[float]:
 
 
 def build_view(market: Market, symbol: str, strike: float, kind: str,
-               feed: CryptoFeed) -> Optional[CryptoView]:
+               feed: CryptoFeed, vol_scale: float = 1.0) -> Optional[CryptoView]:
     """Price a crypto market from an explicit (symbol, strike, kind) spec.
 
     Shared by the regex parser (`fair_view`) and the LLM understanding layer,
     so both compute fair value the same way from live spot + volatility.
+
+    `vol_scale` multiplies the realized volatility before pricing — the single
+    knob for any future calibration fix. NOTE: a backtest showed scaling did not
+    improve the model (see config.yaml), so this defaults to 1.0 (no change).
     """
     if symbol is None or strike is None or strike <= 0 or kind not in ("above", "below", "touch"):
         return None
@@ -89,7 +93,7 @@ def build_view(market: Market, symbol: str, strike: float, kind: str,
     spot = feed.spot(symbol)
     if spot is None or spot <= 0:
         return None
-    sigma = feed.volatility(symbol)
+    sigma = feed.volatility(symbol) * vol_scale
     if kind == "above":
         fair = pricing.prob_above_at_expiry(spot, strike, sigma, tau)
     elif kind == "below":
@@ -100,7 +104,7 @@ def build_view(market: Market, symbol: str, strike: float, kind: str,
                       tau=tau, kind=kind, fair_yes=fair)
 
 
-def fair_view(market: Market, feed: CryptoFeed) -> Optional[CryptoView]:
+def fair_view(market: Market, feed: CryptoFeed, vol_scale: float = 1.0) -> Optional[CryptoView]:
     """Regex parser: detect a crypto price-target market and price it.
 
     Used when the LLM understanding layer is off or unavailable.
@@ -122,4 +126,4 @@ def fair_view(market: Market, feed: CryptoFeed) -> Optional[CryptoView]:
         kind = "touch"
     else:
         return None
-    return build_view(market, symbol, strike, kind, feed)
+    return build_view(market, symbol, strike, kind, feed, vol_scale)

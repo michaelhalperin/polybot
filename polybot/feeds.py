@@ -11,6 +11,7 @@ once per asset.
 from __future__ import annotations
 
 import math
+import re
 import time
 from typing import Dict, Optional, Tuple
 
@@ -48,9 +49,10 @@ class CryptoFeed:
     @staticmethod
     def symbol_for(text: str) -> Optional[str]:
         t = text.lower()
-        # check multi-word keys first, then single tokens
+        # Whole-word match only: a bare substring check mistakes "Airbnb" for
+        # "bnb" (Binance Coin) and "Solana" tickers inside other words.
         for key, sym in SYMBOLS.items():
-            if key in t:
+            if re.search(r"\b" + re.escape(key) + r"\b", t):
                 return sym
         return None
 

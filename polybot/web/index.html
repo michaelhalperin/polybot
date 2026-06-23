@@ -879,6 +879,13 @@
           Stop
         </button>
         <button id="btnScan" onclick="scan()">Scan</button>
+        <button
+          id="btnCopy"
+          onclick="copyForClaude()"
+          title="Copy a full snapshot of the dashboard to paste to Claude"
+        >
+          Copy for Claude
+        </button>
       </div>
     </header>
 
@@ -1974,6 +1981,124 @@
           $("btnScan").disabled = false;
           $("btnScan").textContent = "Scan";
         }
+      }
+
+      // Gather everything the dashboard shows into one plain-text snapshot,
+      // so it can be pasted into a Claude chat for help/debugging.
+      async function copyForClaude() {
+        const btn = $("btnCopy");
+        const orig = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Gathering…";
+        try {
+          const [
+            status,
+            equity,
+            report,
+            opps,
+            positions,
+            trades,
+            ai,
+            logs,
+            config,
+          ] = await Promise.all([
+            api("/api/status"),
+            api("/api/equity?limit=5000"),
+            api("/api/report"),
+            api("/api/opportunities"),
+            api("/api/positions"),
+            api("/api/trades?limit=40"),
+            api("/api/ai"),
+            api("/api/logs"),
+            api("/api/config"),
+          ]);
+          const text = buildSnapshot({
+            status,
+            equity,
+            report,
+            opps,
+            positions,
+            trades,
+            ai,
+            logs,
+            config,
+          });
+          await copyText(text);
+          btn.textContent = "Copied ✓";
+        } catch (e) {
+          console.error(e);
+          btn.textContent = "Copy failed";
+        } finally {
+          setTimeout(() => {
+            btn.textContent = orig;
+            btn.disabled = false;
+          }, 1800);
+        }
+      }
+
+      async function copyText(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          // Fallback for non-secure contexts (http://, file://) where the
+          // async clipboard API is unavailable.
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        }
+      }
+
+      function buildSnapshot(d) {
+        const J = (obj) => JSON.stringify(obj, null, 2);
+        const s = d.status;
+        const lines = [];
+        lines.push("# Polybot dashboard snapshot");
+        lines.push("Captured: " + new Date().toString());
+        lines.push("");
+        lines.push("## Status");
+        lines.push(
+          `mode=${s.mode}  profile=${s.profile}  running=${s.running}` +
+            `  external=${s.external}  read_only=${s.read_only}` +
+            `  ai_active=${s.ai_active}  cycle=${s.cycle_count}`,
+        );
+        lines.push(
+          `equity=${money(s.total)} (${pct(s.pct)})  cash=${money(s.cash)}` +
+            `  exposure=${money(s.positions_val)} (${s.open_count} open)` +
+            `  realized=${money(s.realized_pnl)}  win_rate=${s.win_rate.toFixed(0)}%` +
+            `  closed=${s.closed}  start=${money(s.start_bankroll)}`,
+        );
+        lines.push("");
+        lines.push("## Performance report");
+        lines.push(J(d.report));
+        lines.push("");
+        lines.push(`## Open positions (${d.positions.length})`);
+        lines.push(J(d.positions));
+        lines.push("");
+        lines.push(`## Opportunities (${d.opps.length})`);
+        lines.push(J(d.opps));
+        lines.push("");
+        lines.push(`## Recent trades (${d.trades.length})`);
+        lines.push(J(d.trades));
+        lines.push("");
+        lines.push("## AI understanding");
+        lines.push(J(d.ai));
+        lines.push("");
+        lines.push("## Config (strategy / risk / universe)");
+        lines.push(J(d.config));
+        lines.push("");
+        const eq = d.equity || [];
+        lines.push(`## Equity curve (${eq.length} points, last 20)`);
+        lines.push(J(eq.slice(-20)));
+        lines.push("");
+        const logs = d.logs || [];
+        lines.push(`## Logs (last 60 of ${logs.length})`);
+        lines.push(logs.slice(-60).join("\n"));
+        return lines.join("\n");
       }
 
       const FIELDS = [

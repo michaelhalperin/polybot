@@ -94,6 +94,16 @@ def cmd_status(cfg):
     store.close()
 
 
+def cmd_backtest(cfg, max_scan, horizon_hours):
+    """Offline edge test: does the crypto model beat the market on resolved markets?"""
+    from polybot import backtest
+    setup_logging(cfg.log_level)
+    vol_scale = float(cfg.strategy.get("crypto_vol_scale", 1.0))
+    r = backtest.run_backtest(max_scan=max_scan, horizon_hours=horizon_hours,
+                              vol_scale=vol_scale)
+    print(backtest.format_result(r))
+
+
 def cmd_report(cfg):
     from polybot.report import build_report, format_text
     if not os.path.exists(cfg.db_path):
@@ -157,7 +167,8 @@ def main():
     load_dotenv()  # pick up ANTHROPIC_API_KEY etc. from a local .env (if present)
     parser = argparse.ArgumentParser(description="Polybot — Polymarket paper-trading bot")
     parser.add_argument("command", nargs="?", default="web",
-                        choices=["web", "run", "scan", "status", "report", "pull", "reset"])
+                        choices=["web", "run", "scan", "status", "report", "backtest",
+                                 "pull", "reset"])
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -165,6 +176,10 @@ def main():
                         help="dashboard data source: local SQLite or prod (read-only)")
     parser.add_argument("--autostart", action="store_true",
                         help="start the trading loop immediately (for servers)")
+    parser.add_argument("--max-scan", type=int, default=1500,
+                        help="backtest: how many closed markets to scan")
+    parser.add_argument("--horizon-hours", type=float, default=24.0,
+                        help="backtest: how long before resolution to score the forecast")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -177,6 +192,8 @@ def main():
         host = "0.0.0.0" if (os.environ.get("PORT") and args.host == "127.0.0.1") else args.host
         autostart = args.autostart or os.environ.get("POLYBOT_AUTOSTART") == "1"
         cmd_web(cfg, host, port, autostart, profile=profile)
+    elif args.command == "backtest":
+        cmd_backtest(cfg, args.max_scan, args.horizon_hours)
     else:
         {
             "run": cmd_run,

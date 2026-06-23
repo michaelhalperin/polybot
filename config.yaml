@@ -32,10 +32,19 @@ strategy:
   # ARBITRAGE (riskless): buy YES + NO when their asks sum to < $1.
   arb_min_profit: 0.01       # require >=1 cent profit per $1 set, after fees
 
-  # CRYPTO MODEL (real edge): price "Will BTC be above $X on <date>?" markets
-  # against the LIVE exchange spot price + realized volatility. Trades only
-  # when the market disagrees with the model by more than crypto_min_edge.
-  enable_crypto_model: true
+  # CRYPTO MODEL: price "Will BTC be above $X on <date>?" markets against the
+  # LIVE exchange spot price + realized volatility.
+  #
+  # OFF — the model has no demonstrated edge. A backtest over 59 resolved crypto
+  # markets (run.py backtest) showed it is systematically OVERCONFIDENT in the
+  # uncertain range where it bets (predicts ~50% where reality is ~35%), and a
+  # volatility-shrink correction made its global Brier score WORSE, not better.
+  # Its accuracy is concentrated in obvious cases the market also prices
+  # correctly (no tradeable edge), so live it just overpays for longshots.
+  # Do NOT re-enable until a corrected model PASSES the backtest. See
+  # crypto_vol_scale below for the experiment knob.
+  enable_crypto_model: false
+  crypto_vol_scale: 1.0      # multiply realized vol before pricing (experiment; 1.0 = unchanged)
   crypto_min_edge: 0.05      # require >=5 cents of edge vs the model
   crypto_max_spread: 0.08    # skip markets whose bid/ask gap (absolute) is wider
   crypto_max_spread_pct: 0.20  # ...or wider than 20% of the price (illiquid longshots)
@@ -49,8 +58,10 @@ strategy:
   # market's question AND its resolution rules. This lets the bot price
   # crypto markets the simple parser misses, and SKIP markets whose rules are
   # tricky/ambiguous (a "gotcha" guard). Requires the ANTHROPIC_API_KEY
-  # environment variable. Off by default; falls back to the parser if off.
-  enable_llm_understanding: true
+  # environment variable. NOTE: the AI layer ONLY vets crypto-model markets, so
+  # with enable_crypto_model off it never runs. Off too, to avoid paying for
+  # analysis that isn't used. Re-enable alongside the crypto model.
+  enable_llm_understanding: false
   llm_model: claude-haiku-4-5    # cheap + fast; runs across many markets
 
   # BOOK VALUE (no proven edge — OFF by default): order-book imbalance +

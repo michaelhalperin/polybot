@@ -59,6 +59,8 @@ class Strategy:
         # like "8000 shares of NO at $0.001". Only trade priced 3c..97c.
         self.crypto_min_price = float(s.get("crypto_min_price", 0.03))
         self.crypto_max_price = float(s.get("crypto_max_price", 0.97))
+        # Calibration knob: scales realized vol before pricing. 1.0 = unchanged.
+        self.crypto_vol_scale = float(s.get("crypto_vol_scale", 1.0))
         self.feed = CryptoFeed() if self.enable_crypto_model else None
         # Optional AI market-understanding layer (off unless enabled + API key).
         self.understanding = None
@@ -114,9 +116,9 @@ class Strategy:
                     return None, analysis
                 symbol = self.feed.symbol_for(analysis.asset) if analysis.asset else None
                 view = build_view(market, symbol, analysis.threshold,
-                                  analysis.direction, self.feed)
+                                  analysis.direction, self.feed, self.crypto_vol_scale)
                 return view, analysis
-        return fair_view(market, self.feed), None
+        return fair_view(market, self.feed, self.crypto_vol_scale), None
 
     def _crypto(self, market: Market, yes_book: OrderBook,
                 no_book: OrderBook) -> List[Opportunity]:
