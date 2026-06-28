@@ -73,10 +73,12 @@ class Bot:
             self.store.close()
 
     # ------------------------------------------------------------------
-    def find_opportunities(self):
-        """Read-only: fetch markets + books and return (ranked opps, books).
+    def find_opportunities(self, record_shadow: bool = False):
+        """Read-only*: fetch markets + books and return (ranked opps, books).
 
-        Shared by the trading loop and the UI's 'scan' button.
+        Shared by the trading loop and the UI's 'scan' button. *When
+        `record_shadow` is set (the trading loop), it also logs observe-only
+        crypto-model predictions to the store — the UI scan leaves it off.
         """
         markets = gamma.fetch_active_markets(
             limit=int(self.cfg.universe.get("max_markets_scan", 250)),
@@ -94,12 +96,50 @@ class Bot:
             if self.should_stop():   # bail out fast on Stop (between LLM calls)
                 break
             opps.extend(self.strategy.evaluate(m, books))
+        if record_shadow and self.strategy.enable_shadow:
+            self._record_shadow(markets, books)
         return rank_opportunities(opps), books
+
+    # ------------------------------------------------------------------
+    def _record_shadow(self, markets: List[Market], books: Dict[str, OrderBook]):
+        """Log first-sighting crypto-model predictions vs the live market."""
+        recs = []
+        for m in markets:
+            rec = self.strategy.shadow_predict(m, books)
+            if rec is not None:
+                recs.append(rec)
+        if recs:
+            self.store.record_shadow_batch(recs)
+            self.log.info("Shadow: recorded %d crypto prediction(s).", len(recs))
+
+    def settle_shadow(self):
+        """Fill in true outcomes for shadow predictions whose markets resolved."""
+        if not self.strategy.enable_shadow:
+            return
+        rows = self.store.unsettled_shadow()
+        now = time.time()
+        # Only bother checking markets whose expected resolution has passed.
+        due = [r for r in rows
+               if r["resolution_ts"] is None or r["resolution_ts"] <= now]
+        if not due:
+            return
+        markets = gamma.fetch_markets([r["condition_id"] for r in due])
+        settled = 0
+        for r in due:
+            m = markets.get(r["condition_id"])
+            if m is None or not m.closed or not _is_resolved(m):
+                continue   # not cleanly resolved yet — retry a later cycle
+            self.store.settle_shadow(
+                r["condition_id"], 1 if _token_won(m, r["token_id"]) else 0)
+            settled += 1
+        if settled:
+            self.log.info("Shadow: settled %d prediction(s).", settled)
 
     def run_cycle(self):
         self.cycle_count += 1
         self.manage_positions()
-        opps, books = self.find_opportunities()
+        self.settle_shadow()
+        opps, books = self.find_opportunities(record_shadow=True)
         self.last_opportunities = opps
         self.last_cycle_ts = time.time()
         touch_cycle(self.store, self.cycle_count, opps)

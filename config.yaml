@@ -44,6 +44,13 @@ strategy:
   # Do NOT re-enable until a corrected model PASSES the backtest. See
   # crypto_vol_scale below for the experiment knob.
   enable_crypto_model: false
+  # SHADOW MODE (observe-only, no trading, no risk): each cycle, log the crypto
+  # model's prediction vs the live market price for every crypto market, and
+  # settle the true outcome when it resolves. A market-relative *historical*
+  # backtest is impossible here (the model's markets were barely traded), so this
+  # forward-collects the (model_p, market_p, outcome) data needed to finally
+  # judge whether the model beats the market. View with `python run.py shadow`.
+  enable_shadow: true
   crypto_vol_scale: 1.0      # multiply realized vol before pricing (experiment; 1.0 = unchanged)
   crypto_min_edge: 0.05      # require >=5 cents of edge vs the model
   crypto_max_spread: 0.08    # skip markets whose bid/ask gap (absolute) is wider

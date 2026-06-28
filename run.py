@@ -104,6 +104,45 @@ def cmd_backtest(cfg, max_scan, horizon_hours):
     print(backtest.format_result(r))
 
 
+def cmd_shadow(cfg):
+    """Show the observe-only crypto model's scorecard vs the market."""
+    if not os.path.exists(cfg.db_path):
+        print("No database yet. Run `python run.py web` and let it run first.")
+        return
+    store = Store(cfg.db_path)
+    s = store.shadow_stats()
+    store.close()
+    print("=" * 60)
+    print("SHADOW MODE — crypto model vs market (observe-only, no trades)")
+    print("=" * 60)
+    print(f"  recorded predictions: {s['recorded']}")
+    print(f"  resolved / settled:   {s['settled']}")
+    print(f"  pending resolution:   {s['pending']}")
+    print(f"  scored (have price):  {s['scored']}")
+    if not s.get("scored"):
+        print("\n  Not enough resolved data yet — let it run for a couple weeks,")
+        print("  then re-check. The bot must be RUNNING to collect samples.")
+        print("=" * 60)
+        return
+    print(f"\n  base rate (YES won):  {s['base_rate']:.1%}")
+    print(f"  {'forecaster':<10}{'Brier':>9}{'log loss':>11}{'avg P(yes)':>13}")
+    print("  " + "-" * 42)
+    print(f"  {'model':<10}{s['model_brier']:>9.4f}{s['model_logloss']:>11.4f}"
+          f"{s['model_avg_p']:>13.3f}")
+    print(f"  {'market':<10}{s['market_brier']:>9.4f}{s['market_logloss']:>11.4f}"
+          f"{s['market_avg_p']:>13.3f}")
+    better = "MARKET" if s["market_brier"] < s["model_brier"] else "MODEL"
+    print(f"\n  >> Better forecaster (lower Brier): {better}")
+    print("\n  Betting the model's disagreement with the market:")
+    print(f"  {'min_edge':>9}{'bets':>6}{'win%':>7}{'avg P&L/$':>12}{'total P&L':>11}")
+    print("  " + "-" * 45)
+    for b in s["betting"]:
+        print(f"  {b['min_edge']:>9.2f}{b['bets']:>6}{b['win_rate']*100:>6.0f}%"
+              f"{b['avg_pnl']:>12.4f}{b['total_pnl']:>11.2f}")
+    print("\n  Positive avg P&L/$ = the model adds value; negative = -EV.")
+    print("=" * 60)
+
+
 def cmd_report(cfg):
     from polybot.report import build_report, format_text
     if not os.path.exists(cfg.db_path):
@@ -168,7 +207,7 @@ def main():
     parser = argparse.ArgumentParser(description="Polybot — Polymarket paper-trading bot")
     parser.add_argument("command", nargs="?", default="web",
                         choices=["web", "run", "scan", "status", "report", "backtest",
-                                 "pull", "reset"])
+                                 "shadow", "pull", "reset"])
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -200,6 +239,7 @@ def main():
             "scan": cmd_scan,
             "status": cmd_status,
             "report": cmd_report,
+            "shadow": cmd_shadow,
             "pull": cmd_pull,
             "reset": cmd_reset,
         }[args.command](cfg)

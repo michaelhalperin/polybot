@@ -21,10 +21,11 @@ Edges, in priority order:
 """
 from __future__ import annotations
 
+import time
 from typing import Dict, List, Optional
 
 from .config import Config
-from .crypto import build_view, fair_view
+from .crypto import build_view, fair_view, _end_ts
 from .feeds import CryptoFeed
 from .log import get_logger
 from .models import Leg, Market, OrderBook, Opportunity
@@ -61,7 +62,11 @@ class Strategy:
         self.crypto_max_price = float(s.get("crypto_max_price", 0.97))
         # Calibration knob: scales realized vol before pricing. 1.0 = unchanged.
         self.crypto_vol_scale = float(s.get("crypto_vol_scale", 1.0))
-        self.feed = CryptoFeed() if self.enable_crypto_model else None
+        # Shadow mode: compute + log the crypto model's predictions vs the live
+        # market WITHOUT trading them, so we can measure edge over time even when
+        # the model is disabled for trading. Needs the feed regardless.
+        self.enable_shadow = bool(s.get("enable_shadow", False))
+        self.feed = CryptoFeed() if (self.enable_crypto_model or self.enable_shadow) else None
         # Optional AI market-understanding layer (off unless enabled + API key).
         self.understanding = None
         if s.get("enable_llm_understanding", False):
@@ -97,6 +102,40 @@ class Strategy:
         if self.enable_book_value:
             return self._value(market, yes_book, no_book)
         return []
+
+    # ------------------------------------------------------------------
+    def shadow_predict(self, market: Market,
+                       books: Dict[str, OrderBook]) -> Optional[dict]:
+        """Observe-only: the crypto model's prediction + the live market price
+        for one crypto market, regardless of whether crypto trading is enabled.
+
+        Returns a row for `store.record_shadow_batch`, or None if the market
+        isn't a parseable crypto price target (or the model can't price it).
+        Uses the regex parser only — no LLM cost — to stay cheap on every cycle.
+        """
+        if self.feed is None or not market.is_binary:
+            return None
+        view = fair_view(market, self.feed, self.crypto_vol_scale)
+        if view is None:
+            return None
+        yes_book = books.get(market.token_ids[0])
+        return {
+            "condition_id": market.condition_id,
+            "token_id": market.token_ids[0],
+            "question": market.question,
+            "symbol": view.symbol,
+            "kind": view.kind,
+            "strike": view.strike,
+            "spot": view.spot,
+            "sigma": view.sigma,
+            "tau": view.tau,
+            "model_p": view.fair_yes,
+            "market_bid": yes_book.best_bid if yes_book else None,
+            "market_ask": yes_book.best_ask if yes_book else None,
+            "market_mid": yes_book.mid if yes_book else None,
+            "seen_ts": time.time(),
+            "resolution_ts": _end_ts(market),
+        }
 
     # ------------------------------------------------------------------
     def _crypto_view(self, market: Market):

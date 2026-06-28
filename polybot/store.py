@@ -6,6 +6,7 @@ after a restart, and analyze results later.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import time
@@ -83,6 +84,31 @@ CREATE TABLE IF NOT EXISTS opportunity_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_opp_log_ts ON opportunity_log(ts);
+
+-- Shadow mode: observe-only crypto-model predictions vs the live market price,
+-- one row per market at first sighting, settled with the true outcome later.
+-- Lets us measure whether the crypto model beats the market WITHOUT trading,
+-- since a historical backtest is impossible (the markets were barely traded).
+CREATE TABLE IF NOT EXISTS shadow_predictions (
+    condition_id   TEXT PRIMARY KEY,
+    token_id       TEXT NOT NULL,        -- the YES token
+    question       TEXT NOT NULL,
+    symbol         TEXT,
+    kind           TEXT,                 -- above | below | touch
+    strike         REAL,
+    spot           REAL,
+    sigma          REAL,
+    tau            REAL,                 -- years to expiry at sighting
+    model_p        REAL NOT NULL,        -- model P(yes) at sighting
+    market_bid     REAL,
+    market_ask     REAL,
+    market_mid     REAL,
+    seen_ts        REAL NOT NULL,
+    resolution_ts  REAL,
+    settled        INTEGER DEFAULT 0,
+    outcome        INTEGER,              -- 1 yes won, 0 no won
+    settled_ts     REAL
+);
 """
 
 
@@ -281,6 +307,107 @@ class Store:
             "win_rate": (wins / len(closed)) if closed else 0.0,
             "realized_pnl": sum(r["realized_pnl"] for r in closed),
         }
+
+    # ---- shadow predictions (observe-only crypto model) ----
+    _SHADOW_COLS = ("condition_id", "token_id", "question", "symbol", "kind",
+                    "strike", "spot", "sigma", "tau", "model_p", "market_bid",
+                    "market_ask", "market_mid", "seen_ts", "resolution_ts")
+
+    def record_shadow_batch(self, recs: List[dict]):
+        """Insert first-sighting predictions; ignore markets already recorded."""
+        if not recs:
+            return
+        ph = ", ".join(f":{c}" for c in self._SHADOW_COLS)
+        cols = ", ".join(self._SHADOW_COLS)
+        self.conn.executemany(
+            f"INSERT OR IGNORE INTO shadow_predictions ({cols}) VALUES ({ph})",
+            recs,
+        )
+        self.conn.commit()
+
+    def unsettled_shadow(self) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT condition_id, token_id, resolution_ts FROM shadow_predictions "
+            "WHERE settled=0").fetchall()
+
+    def settle_shadow(self, condition_id: str, outcome: int):
+        self.conn.execute(
+            "UPDATE shadow_predictions SET settled=1, outcome=?, settled_ts=? "
+            "WHERE condition_id=?", (outcome, time.time(), condition_id))
+        self.conn.commit()
+
+    def shadow_stats(self) -> dict:
+        """Model-vs-market scorecard over settled shadow predictions.
+
+        Brier/log loss compare the model's forecast to the market's price as
+        forecasts of the true outcome (lower = better). The betting sim trades
+        the model's disagreement with the market and settles at ground truth —
+        positive avg P&L/$ = the model would have added value.
+        """
+        total = self.conn.execute(
+            "SELECT COUNT(*) AS c FROM shadow_predictions").fetchone()["c"]
+        rows = self.conn.execute(
+            "SELECT model_p, market_bid, market_ask, market_mid, outcome "
+            "FROM shadow_predictions WHERE settled=1 AND outcome IS NOT NULL").fetchall()
+        out = {"recorded": total, "settled": len(rows),
+               "pending": total - len(rows), "scored": 0}
+
+        def market_p(r):
+            if r["market_mid"] is not None:
+                return r["market_mid"]
+            b, a = r["market_bid"], r["market_ask"]
+            if b is not None and a is not None:
+                return (b + a) / 2.0
+            return a if a is not None else b
+
+        samples = []  # (model_p, market_p, outcome)
+        for r in rows:
+            mp = market_p(r)
+            if mp is None or not (0.0 < mp < 1.0):
+                continue
+            samples.append((float(r["model_p"]), float(mp), int(r["outcome"])))
+        n = len(samples)
+        out["scored"] = n
+        if n == 0:
+            return out
+
+        def clip(p):
+            return max(1e-6, min(1 - 1e-6, p))
+
+        ys = [s[2] for s in samples]
+        model_ps = [clip(s[0]) for s in samples]
+        market_ps = [clip(s[1]) for s in samples]
+        out["base_rate"] = sum(ys) / n
+        out["model_brier"] = sum((p - y) ** 2 for p, y in zip(model_ps, ys)) / n
+        out["market_brier"] = sum((p - y) ** 2 for p, y in zip(market_ps, ys)) / n
+        out["model_logloss"] = -sum(
+            y * math.log(p) + (1 - y) * math.log(1 - p)
+            for p, y in zip(model_ps, ys)) / n
+        out["market_logloss"] = -sum(
+            y * math.log(p) + (1 - y) * math.log(1 - p)
+            for p, y in zip(market_ps, ys)) / n
+        out["model_avg_p"] = sum(model_ps) / n
+        out["market_avg_p"] = sum(market_ps) / n
+
+        bets = []
+        for edge in (0.03, 0.05, 0.10, 0.15):
+            pnl = k = w = 0
+            for m_model, m_mkt, y in samples:
+                d = m_model - m_mkt
+                if d > edge:
+                    entry, won = m_mkt, y == 1
+                elif -d > edge:
+                    entry, won = 1 - m_mkt, y == 0
+                else:
+                    continue
+                k += 1
+                w += 1 if won else 0
+                pnl += (1.0 - entry) if won else -entry
+            bets.append({"min_edge": edge, "bets": k,
+                         "win_rate": w / k if k else 0.0,
+                         "total_pnl": pnl, "avg_pnl": pnl / k if k else 0.0})
+        out["betting"] = bets
+        return out
 
     def close(self):
         self.conn.close()
