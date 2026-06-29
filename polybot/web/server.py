@@ -451,6 +451,16 @@ def create_app(cfg: Config, runner: BotRunner,
         st.close()
         return jsonify(rep)
 
+    @app.route("/api/shadow")
+    def api_shadow():
+        remote = _remote_or_local("/api/shadow")
+        if remote is not None:
+            return jsonify(remote)
+        st = viewed_store()
+        stats = st.shadow_stats()
+        st.close()
+        return jsonify(stats)
+
     @app.route("/api/logs")
     def api_logs():
         remote = _remote_or_local("/api/logs")

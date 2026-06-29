@@ -104,14 +104,32 @@ def cmd_backtest(cfg, max_scan, horizon_hours):
     print(backtest.format_result(r))
 
 
-def cmd_shadow(cfg):
-    """Show the observe-only crypto model's scorecard vs the market."""
-    if not os.path.exists(cfg.db_path):
-        print("No database yet. Run `python run.py web` and let it run first.")
-        return
-    store = Store(cfg.db_path)
-    s = store.shadow_stats()
-    store.close()
+def cmd_shadow(cfg, profile="local"):
+    """Show the observe-only crypto model's scorecard vs the market.
+
+    With --profile prod, read the live scoreboard from the remote dashboard
+    (POLYBOT_PROD_URL) instead of the local SQLite DB, since the bot itself
+    runs on the server, not locally.
+    """
+    if profile == "prod":
+        from polybot.profiles import prod_remote_url
+        from polybot.web.remote import remote_get
+        base = prod_remote_url()
+        if not base:
+            print("Set POLYBOT_PROD_URL in .env to read the prod scoreboard.")
+            return
+        s = remote_get(base, "/api/shadow")
+        if s is None:
+            print(f"Could not reach prod dashboard at {base}.")
+            print("Check POLYBOT_PROD_URL and POLYBOT_PASSWORD in .env.")
+            return
+    else:
+        if not os.path.exists(cfg.db_path):
+            print("No database yet. Run `python run.py web` and let it run first.")
+            return
+        store = Store(cfg.db_path)
+        s = store.shadow_stats()
+        store.close()
     print("=" * 60)
     print("SHADOW MODE — crypto model vs market (observe-only, no trades)")
     print("=" * 60)
@@ -239,7 +257,7 @@ def main():
             "scan": cmd_scan,
             "status": cmd_status,
             "report": cmd_report,
-            "shadow": cmd_shadow,
+            "shadow": lambda cfg: cmd_shadow(cfg, profile=profile),
             "pull": cmd_pull,
             "reset": cmd_reset,
         }[args.command](cfg)
